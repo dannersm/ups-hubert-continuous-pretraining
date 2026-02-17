@@ -65,10 +65,10 @@ _PRETRAINING_CONFIG = Wav2Vec2Config(
     num_conv_pos_embeddings=128,
     num_conv_pos_embedding_groups=16,
     # Quantizer (derived from checkpoint shapes)
-    codevector_dim=256,
+    codevector_dim=768,
     num_codevector_groups=2,
     num_codevectors_per_group=320,
-    proj_codevector_dim=256,
+    proj_codevector_dim=768,
     # Pre-training (wav2vec 2.0 paper defaults)
     mask_time_prob=0.065,
     mask_time_length=10,
@@ -120,10 +120,10 @@ def _convert_key(k: str) -> str | None:
     if k.startswith("encoder.layers."):
         k = k.replace(".self_attn_layer_norm.", ".layer_norm.")
         k = k.replace(".self_attn.", ".attention.")
-        k = k.replace(".output_proj.", ".out_proj.")
         k = k.replace(".ffn_layer_norm.", ".final_layer_norm.")
         k = k.replace(".ffn.inner_proj.", ".feed_forward.intermediate_dense.")
         k = k.replace(".ffn.output_proj.", ".feed_forward.output_dense.")
+        k = k.replace(".output_proj.", ".out_proj.")
         return k
 
     # Encoder final layer norm (keys already match)

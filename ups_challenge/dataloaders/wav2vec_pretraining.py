@@ -6,14 +6,15 @@ No k-means labels are needed since wav2vec2 uses internal Gumbel-softmax
 quantization.
 """
 
+import io
 import os
 import pickle
 import re
 
 import numpy as np
 import torch
+import torchaudio
 import webdataset as wds
-from torchcodec.decoders import AudioDecoder
 
 from ups_challenge.dataloaders.masked_pretraining import (
     _build_lookup,
@@ -47,14 +48,32 @@ def _decode_chunks(sample, lookup, target_sr=16000):
 
     results = []
     try:
-        decoder = AudioDecoder(source=mp3_bytes, sample_rate=target_sr, num_channels=1)
-        full_audio = decoder.get_all_samples().data.squeeze(0)
+        # Load MP3 from bytes
+        with io.BytesIO(mp3_bytes) as f:
+            full_audio, sr = torchaudio.load(f, format="mp3")
+
+        # Resample if necessary
+        if sr != target_sr:
+            full_audio = torchaudio.functional.resample(full_audio, sr, target_sr)
+
+        # Convert to mono if necessary
+        if full_audio.shape[0] > 1:
+            full_audio = full_audio.mean(dim=0, keepdim=True)
+        
+        # Squeeze channel dim: [1, T] -> [T]
+        full_audio = full_audio.squeeze(0)
 
         for entry in entries:
             start_sample = int(entry["start_sec"] * target_sr)
             end_sample = int(entry["end_sec"] * target_sr)
-            waveform = full_audio[start_sample:end_sample]
-            results.append({"waveform": waveform.numpy()})
+            
+            # Simple bounds check
+            start_sample = max(0, start_sample)
+            end_sample = min(len(full_audio), end_sample)
+            
+            if end_sample > start_sample:
+                waveform = full_audio[start_sample:end_sample]
+                results.append({"waveform": waveform.numpy()})
 
     except Exception as e:
         _error_counts["decode"] += 1
