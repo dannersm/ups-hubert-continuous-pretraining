@@ -5,19 +5,34 @@ Reads a pre-built index (from prepare_pretraining_index.py) that maps
 from HuggingFace tars via WebDataset, extracts the specific chunk for each
 matching file, and returns (waveform, labels) pairs.
 
-When the index contains a "language" field, entries are grouped by language
-and streamed via wds.RandomMix for proportional interleaving.
+Language stratification is baked into the chunk index; the dataloader uses
+a single WebDataset over all tars for finite, deterministic epochs.
 """
 
 import os
 import pickle
 import re
+import subprocess
 from collections import defaultdict
 
 import numpy as np
 import torch
 import webdataset as wds
 from torchcodec.decoders import AudioDecoder
+
+# ---------------------------------------------------------------------------
+# Error tracking (per-worker counters, logged with rate limiting)
+# ---------------------------------------------------------------------------
+_error_counts = {"decode": 0, "wds": 0}
+
+
+def _warn_and_continue(exn):
+    """WebDataset error handler that logs instead of silently skipping."""
+    _error_counts["wds"] += 1
+    n = _error_counts["wds"]
+    if n <= 3 or (n <= 100 and n % 10 == 0) or n % 500 == 0:
+        print(f"  [WebDataset] error #{n}: {type(exn).__name__}: {exn}")
+    return True
 
 
 def _download_tar(tar_number, hf_token, cache_dir):
@@ -33,7 +48,6 @@ def _download_tar(tar_number, hf_token, cache_dir):
     )
     os.makedirs(cache_dir, exist_ok=True)
     temp = dest + f".tmp{os.getpid()}"
-    import subprocess
     subprocess.run(
         ["curl", "-s", "-L", "-o", temp, "-H", f"Authorization:Bearer {hf_token}", url],
         check=True,
@@ -102,7 +116,12 @@ def _decode_pretraining(sample, lookup, target_sr=16000):
                 "labels": entry["labels"],
             })
 
-    except Exception:
+    except Exception as e:
+        _error_counts["decode"] += 1
+        n = _error_counts["decode"]
+        if n <= 3 or (n <= 100 and n % 10 == 0) or n % 500 == 0:
+            print(f"  [decode] error #{n} ({os.path.basename(key)}): "
+                  f"{type(e).__name__}: {e}")
         return []
 
     return results
@@ -151,9 +170,8 @@ def _flatten_list(stream):
 def build_pretraining_dataset(index_path, hf_token=None, target_sr=16000, cache_dir="./data/tar_cache"):
     """Build a WebDataset that yields {waveform, labels} from a pretraining index.
 
-    If the index entries contain a "language" field, creates one WebDataset per
-    language and combines them with wds.RandomMix for proportional interleaving.
-    Otherwise falls back to a single dataset over all tars.
+    Uses a single WebDataset over all tars for finite epochs. If entries have
+    a "language" field, prints the language distribution for visibility.
 
     Args:
         index_path: Path to the pickle index produced by prepare_pretraining_index.py.
@@ -184,8 +202,8 @@ def _build_single_dataset(index_entries, hf_token, target_sr, cache_dir=None):
     urls = _build_tar_urls(tar_numbers, hf_token, cache_dir)
 
     dataset = (
-        wds.WebDataset(urls, shardshuffle=True, handler=wds.handlers.ignore_and_continue)
-        .to_tuple("mp3", "__key__", "__url__", handler=wds.handlers.ignore_and_continue)
+        wds.WebDataset(urls, shardshuffle=False, handler=_warn_and_continue)
+        .to_tuple("mp3", "__key__", "__url__", handler=_warn_and_continue)
         .map(lambda s: _decode_pretraining(s, lookup, target_sr))
         .compose(_flatten_list)
         .shuffle(1000)
@@ -195,42 +213,30 @@ def _build_single_dataset(index_entries, hf_token, target_sr, cache_dir=None):
 
 
 def _build_multilang_dataset(index_entries, hf_token, target_sr, cache_dir=None):
-    """Build per-language WebDatasets combined with RandomMix."""
-    # Group entries by language
-    entries_by_lang = defaultdict(list)
+    """Build a single WebDataset from multilang index entries.
+
+    Language stratification is already in the chunk index. We use one
+    WebDataset over all tars → finite epochs, no RandomMix.
+    """
+    # Print language distribution for visibility
+    entries_by_lang = defaultdict(int)
     for entry in index_entries:
-        lang = entry.get("language", "unknown")
-        entries_by_lang[lang].append(entry)
+        entries_by_lang[entry.get("language", "unknown")] += 1
 
-    print(f"Building multilang dataset with {len(entries_by_lang)} languages:")
+    print(f"Building dataset: {len(entries_by_lang)} languages, "
+          f"{len(index_entries)} entries")
     for lang in sorted(entries_by_lang):
-        print(f"  {lang}: {len(entries_by_lang[lang])} entries")
+        print(f"  {lang}: {entries_by_lang[lang]} entries")
 
-    datasets = []
-    weights = []
+    lookup = _build_lookup(index_entries)
+    tar_numbers = {e["tar_number"] for e in index_entries}
+    urls = _build_tar_urls(tar_numbers, hf_token, cache_dir)
 
-    for lang, entries in sorted(entries_by_lang.items()):
-        lookup = _build_lookup(entries)
-        tar_numbers = {e["tar_number"] for e in entries}
-        urls = _build_tar_urls(tar_numbers, hf_token, cache_dir)
-
-        ds = (
-            wds.WebDataset(urls, shardshuffle=False, handler=wds.handlers.ignore_and_continue)
-            .to_tuple("mp3", "__key__", "__url__", handler=wds.handlers.ignore_and_continue)
-            .map(lambda s, lk=lookup: _decode_pretraining(s, lk, target_sr))
-            .compose(_flatten_list)
-        )
-        datasets.append(ds)
-        weights.append(len(entries))
-
-    # Normalize weights to probabilities
-    total = sum(weights)
-    probs = [w / total for w in weights]
-
-    # Interleave proportionally across languages
-    # shuffle(5000): larger buffer compensates for tar-sequential locality
-    dataset = wds.DataPipeline(
-        wds.RandomMix(datasets, probs=probs),
-        wds.shuffle(5000),
+    dataset = (
+        wds.WebDataset(urls, shardshuffle=False, handler=_warn_and_continue)
+        .to_tuple("mp3", "__key__", "__url__", handler=_warn_and_continue)
+        .map(lambda s: _decode_pretraining(s, lookup, target_sr))
+        .compose(_flatten_list)
+        .shuffle(5000)
     )
     return dataset

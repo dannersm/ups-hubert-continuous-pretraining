@@ -283,8 +283,8 @@ def main():
         if len(tar_langs_set) > 8:
             lang_str += f",...(+{len(tar_langs_set)-8})"
         print(f"  {tar}  {n:>6,} chunks  {h:.1f}h  langs: {lang_str}")
-    est_gb = len(unique_tars) * 0.5
-    print(f"Estimated download: ~{est_gb:.1f} GB  (~0.5 GB/tar estimate)")
+    est_gb = len(unique_tars) * 4.5
+    print(f"Estimated download: ~{est_gb:.1f} GB  (~4.5 GB/tar estimate)")
     print("=" * 52)
 
     print("\nLanguage breakdown:")

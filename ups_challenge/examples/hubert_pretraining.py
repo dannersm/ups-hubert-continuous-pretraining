@@ -12,6 +12,7 @@ Usage:
 
 import argparse
 import os
+import pickle
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -217,7 +218,6 @@ def train_hubert(
     grad_accum_steps=4,
     warmup_steps=1500,
     max_grad_norm=1.0,
-    save_every_steps=500,
     resume=False,
     projection_warmup_epochs=0,
     projection_lr=None,
@@ -275,10 +275,8 @@ def train_hubert(
     # Resume from checkpoint if requested
     os.makedirs(output_dir, exist_ok=True)
     global_step = 0
-    micro_step = 0
     start_epoch = 0
     loss_history = []
-    accum_loss = 0.0
 
     resume_ckpt_path = os.path.join(output_dir, "training_state.pt")
     if resume and os.path.exists(resume_ckpt_path):
@@ -286,7 +284,6 @@ def train_hubert(
         ckpt = torch.load(resume_ckpt_path, map_location=device, weights_only=False)
         model.load_state_dict(ckpt["model"])
         global_step = ckpt["global_step"]
-        micro_step = ckpt["micro_step"]
         start_epoch = ckpt["epoch"]
         loss_history = ckpt.get("loss_history", [])
         # Re-setup the right phase before restoring optimizer/scheduler
@@ -298,15 +295,14 @@ def train_hubert(
         scheduler.load_state_dict(ckpt["scheduler"])
         print(f"  Resumed at epoch {start_epoch+1}, global_step {global_step}")
 
-    def _save_training_state(epoch_idx):
-        """Save full training state for resumability."""
+    def _save_training_state(next_epoch):
+        """Save full training state for resumability (epoch-level)."""
         state = {
             "model": model.state_dict(),
             "optimizer": optimizer.state_dict(),
             "scheduler": scheduler.state_dict(),
             "global_step": global_step,
-            "micro_step": micro_step,
-            "epoch": epoch_idx,
+            "epoch": next_epoch,
             "loss_history": loss_history,
         }
         tmp = resume_ckpt_path + f".tmp{os.getpid()}"
@@ -314,22 +310,19 @@ def train_hubert(
         os.rename(tmp, resume_ckpt_path)
 
     # Train
-    print(f"Starting training (epochs {start_epoch+1}-{total_epochs}, "
-          f"save every {save_every_steps} steps)...")
+    print(f"Starting training (epochs {start_epoch+1}-{total_epochs})...")
 
     for epoch in range(start_epoch, total_epochs):
         # Phase transition: projection warmup -> CPT
-        if epoch == projection_warmup_epochs and projection_warmup_epochs > 0:
+        # Skip if we resumed directly into CPT (optimizer/scheduler already restored)
+        if epoch == projection_warmup_epochs and projection_warmup_epochs > 0 and start_epoch < projection_warmup_epochs:
             print(f"\n--- Phase 2: CPT (unfreezing all layers), "
                   f"lr={learning_rate:.2e}, warmup={warmup_steps} steps ---")
             optimizer, scheduler = _setup_cpt_phase()
             global_step = 0  # reset step counter for CPT warmup
             model.zero_grad()
-            accum_loss = 0.0
-            micro_step = 0
 
-        # Rebuild dataset + loader each epoch so the WebDataset iterator
-        # starts fresh (RandomMix / DataPipeline don't reset on re-iter).
+        # Rebuild dataset each epoch for a fresh iterator
         dataset = build_pretraining_dataset(index_path=index_path, hf_token=hf_token,
                                             cache_dir=cache_dir)
         data_loader = torch.utils.data.DataLoader(
@@ -341,18 +334,12 @@ def train_hubert(
 
         epoch_loss = 0.0
         num_batches = 0
-        batches_to_skip = 0
-
-        # If resuming mid-epoch, skip already-seen batches
-        if epoch == start_epoch and micro_step > 0:
-            batches_to_skip = micro_step
-            print(f"  Skipping {batches_to_skip} micro-batches to resume mid-epoch...")
+        micro_step = 0
+        accum_loss = 0.0
 
         phase_str = "proj" if epoch < projection_warmup_epochs else "CPT"
         pbar = tqdm(data_loader, desc=f"Epoch {epoch + 1}/{total_epochs} [{phase_str}]")
         for batch_idx, batch in enumerate(pbar):
-            if batch_idx < batches_to_skip:
-                continue
             if batch is None:
                 continue
 
@@ -405,30 +392,24 @@ def train_hubert(
                 "lr": f"{scheduler.get_last_lr()[0]:.2e}",
             })
 
-            # Periodic checkpoint
-            if save_every_steps and global_step % save_every_steps == 0:
-                print(f"\n  Saving checkpoint at step {global_step}...")
-                _save_training_state(epoch)
-                _save_loss_plot(loss_history, output_dir)
-
             if max_steps is not None and global_step >= max_steps:
                 print(f"\nReached max_steps={max_steps}, stopping.")
-                _save_training_state(epoch)
+                _save_training_state(epoch)  # restart this epoch on resume
                 _save_loss_plot(loss_history, output_dir)
                 return
 
         avg = epoch_loss / max(num_batches, 1)
-        print(f"Epoch {epoch + 1} done. avg_loss={avg:.4f}")
+        print(f"Epoch {epoch + 1} done. avg_loss={avg:.4f}, "
+              f"batches={num_batches}, global_step={global_step}")
 
         # Save checkpoint at end of epoch
         ckpt_path = os.path.join(output_dir, f"hubert_epoch_{epoch + 1}.pt")
         print(f"Saving epoch checkpoint to {ckpt_path}")
         torch.save(model.state_dict(), ckpt_path)
-        micro_step = 0  # Reset for next epoch
         _save_training_state(epoch + 1)
+        _save_loss_plot(loss_history, output_dir)
 
     print("Training completed!")
-    _save_loss_plot(loss_history, output_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -455,8 +436,6 @@ if __name__ == "__main__":
     parser.add_argument("--cache_dir", type=str, default="./data/tar_cache",
                         help="Directory to cache downloaded tars (reused across runs)")
     parser.add_argument("--output_dir", type=str, default="./checkpoints")
-    parser.add_argument("--save_every_steps", type=int, default=500,
-                        help="Save full training state every N optimizer steps")
     parser.add_argument("--resume", action="store_true",
                         help="Resume from training_state.pt in output_dir")
     parser.add_argument("--projection_warmup_epochs", type=int, default=0,
@@ -484,7 +463,6 @@ if __name__ == "__main__":
         grad_accum_steps=args.grad_accum_steps,
         warmup_steps=args.warmup_steps,
         max_grad_norm=args.max_grad_norm,
-        save_every_steps=args.save_every_steps,
         resume=args.resume,
         projection_warmup_epochs=args.projection_warmup_epochs,
         projection_lr=args.projection_lr,
