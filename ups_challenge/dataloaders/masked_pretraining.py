@@ -13,7 +13,6 @@ import os
 import pickle
 import re
 import subprocess
-from collections import defaultdict
 
 import numpy as np
 import torch
@@ -185,48 +184,6 @@ def build_pretraining_dataset(index_path, hf_token=None, target_sr=16000, cache_
 
     with open(index_path, "rb") as f:
         index_entries = pickle.load(f)
-
-    # Check if entries have language info
-    has_language = any("language" in e for e in index_entries)
-
-    if has_language:
-        return _build_multilang_dataset(index_entries, hf_token, target_sr, cache_dir)
-    else:
-        return _build_single_dataset(index_entries, hf_token, target_sr, cache_dir)
-
-
-def _build_single_dataset(index_entries, hf_token, target_sr, cache_dir=None):
-    """Build a single WebDataset over all entries (legacy path)."""
-    lookup = _build_lookup(index_entries)
-    tar_numbers = {e["tar_number"] for e in index_entries}
-    urls = _build_tar_urls(tar_numbers, hf_token, cache_dir)
-
-    dataset = (
-        wds.WebDataset(urls, shardshuffle=False, handler=_warn_and_continue)
-        .to_tuple("mp3", "__key__", "__url__", handler=_warn_and_continue)
-        .map(lambda s: _decode_pretraining(s, lookup, target_sr))
-        .compose(_flatten_list)
-        .shuffle(1000)
-    )
-
-    return dataset
-
-
-def _build_multilang_dataset(index_entries, hf_token, target_sr, cache_dir=None):
-    """Build a single WebDataset from multilang index entries.
-
-    Language stratification is already in the chunk index. We use one
-    WebDataset over all tars → finite epochs, no RandomMix.
-    """
-    # Print language distribution for visibility
-    entries_by_lang = defaultdict(int)
-    for entry in index_entries:
-        entries_by_lang[entry.get("language", "unknown")] += 1
-
-    print(f"Building dataset: {len(entries_by_lang)} languages, "
-          f"{len(index_entries)} entries")
-    for lang in sorted(entries_by_lang):
-        print(f"  {lang}: {entries_by_lang[lang]} entries")
 
     lookup = _build_lookup(index_entries)
     tar_numbers = {e["tar_number"] for e in index_entries}

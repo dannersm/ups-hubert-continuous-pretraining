@@ -12,7 +12,8 @@ Usage:
 
 import argparse
 import os
-import pickle
+
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -44,23 +45,10 @@ def compute_span_mask(shape, mask_prob, mask_length, attention_mask=None, device
         attention_mask: (batch_size, seq_len) 1=valid, 0=padding.
         device: Torch device.
     """
-    bsz, seq_len = shape
-    
-    # 1. Sample starting indices
-    # We only sample starts where attention_mask is 1 (or everywhere if None)
-    if attention_mask is not None:
-        valid_mask = attention_mask.float()
-    else:
-        valid_mask = torch.ones(shape, device=device)
-        
-    # Bernoulli sampling for starts
-    # mask_prob is the probability of a START, not total coverage
-    probs = torch.full(shape, mask_prob, device=device) * valid_mask
+    valid_mask = attention_mask if attention_mask is not None else torch.ones(shape)
+    probs = torch.full(shape, mask_prob, device=device) * valid_mask,float()
     mask_starts = torch.bernoulli(probs) # [B, T] (float for conv)
     
-    # 2. Expand starts to spans using convolution
-    # We use a 1D convolution with a kernel of ones to dilate the starts
-    # Kernel shape: [OutCh, InCh, KernelSize] -> [1, 1, mask_length]
     if mask_starts.sum() == 0:
         return torch.zeros(shape, dtype=torch.bool, device=device)
 
@@ -68,30 +56,13 @@ def compute_span_mask(shape, mask_prob, mask_length, attention_mask=None, device
     mask_starts_unsqueezed = mask_starts.unsqueeze(1)
     kernel = torch.ones(1, 1, mask_length, device=device)
     
-    # Padding logic:
-    # If t is a start, we want to mask [t, t+1, ... t+L-1].
-    # This corresponds to a convolution where output[t] depends on input[t].
-    # Standard Conv1d without padding would shrink the output.
-    # We pad the RIGHT side by L-1 so the convolution "reaches forward".
-    # Wait, actually:
-    # y[t] = sum(x[t:t+k])? No, that's future looking.
-    # Conv1d is usually: y[t] = sum(x[t-k]*w[k]).
-    # If we want a start at `t` to affect `t, t+1...`, then output at `t+k` needs to see input at `t`.
-    # That means the kernel looks BACK.
-    # So if we have a start at T=0, we want mask at T=0, T=1...
-    # At T=1, the conv window [T-L+1 : T+1] covers T=0. Yes.
-    # So standard causal convolution works.
-    # We pad LEFT by mask_length - 1.
     
     padded_starts = F.pad(mask_starts_unsqueezed, (mask_length - 1, 0)) # Pad left
     
-    # Convolve
     mask_expanded = F.conv1d(padded_starts, kernel) # [B, 1, T]
     
-    # Threshold > 0
     mask = mask_expanded.squeeze(1) > 0
     
-    # 3. Ensure we didn't mask padding (just in case expansion went over into pure padding zone)
     if attention_mask is not None:
         mask = mask & attention_mask.bool()
         
@@ -200,6 +171,43 @@ def _save_loss_plot(loss_history, output_dir):
     print(f"Loss curve saved to {path}")
 
 
+def _save_training_state(model: HubertForPreTraining,
+                         optimizer: torch.optim.Optimizer,
+                         scheduler: torch.optim.lr_scheduler.LRScheduler,
+                         epoch: int,
+                         global_step: int,
+                         loss_history: list[dict[str, float]],
+                         out: str | Path | None = None,
+                         ):
+    """Save full training state for resumability (epoch-level)."""
+    if out is None:
+        out = "training_state.pt"
+    state = {
+        "model": model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "scheduler": scheduler.state_dict(),
+        "epoch": epoch,
+        "loss_history": loss_history,
+        "global_step": global_step,
+    }
+    torch.save(state, out)
+
+
+def _setup_projection_phase(lr: float):
+    """Phase 1: freeze hubert, train only projection with flat LR."""
+    opt = torch.optim.AdamW(model.projection.parameters(), lr=lr)
+    sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda step: 1.0)
+    return opt, sched
+
+def _setup_cpt_phase(lr: float):
+    """Phase 2: unfreeze everything, train with warmup."""
+    opt = torch.optim.AdamW(model.parameters(), lr=lr)
+    sched = torch.optim.lr_scheduler.LambdaLR(
+        opt,
+        lambda step: min(1.0, float(step) / float(max(1, warmup_steps))),
+    )
+    return opt, sched
+
 def train_hubert(
     model_name="facebook/hubert-base-ls960",
     index_path="./data/pretraining_index_100h.pkl",
@@ -214,7 +222,7 @@ def train_hubert(
     hf_token=None,
     max_steps=None,
     output_dir="./checkpoints",
-    cache_dir=None,
+    cache_dir="./data/tar_cache",
     grad_accum_steps=4,
     warmup_steps=1500,
     max_grad_norm=1.0,
@@ -240,91 +248,51 @@ def train_hubert(
     feature_extractor = AutoFeatureExtractor.from_pretrained(model_name)
     model.to(device)
     model.train()
+    model.hubert.requires_grad_(False)
+    model.projection.requires_grad_(True)
 
     total_epochs = projection_warmup_epochs + num_epochs
+    epoch = 0
+    start_epoch = 0
+    global_step = 0
+    
+    output_dir = Path(output_dir)
+    os.makedirs(output_dir, exist_ok=True)
+
     if projection_lr is None:
         projection_lr = learning_rate
-
-    def _setup_projection_phase():
-        """Phase 1: freeze hubert, train only projection with flat LR."""
-        model.hubert.requires_grad_(False)
-        model.projection.requires_grad_(True)
-        opt = torch.optim.AdamW(model.projection.parameters(), lr=projection_lr)
-        sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda step: 1.0)
-        return opt, sched
-
-    def _setup_cpt_phase():
-        """Phase 2: unfreeze everything, train with warmup."""
-        model.hubert.requires_grad_(True)
-        model.projection.requires_grad_(True)
-        opt = torch.optim.AdamW(model.parameters(), lr=learning_rate)
-        sched = torch.optim.lr_scheduler.LambdaLR(
-            opt,
-            lambda step: min(1.0, float(step) / float(max(1, warmup_steps))),
-        )
-        return opt, sched
-
-    # Start in the right phase
-    if projection_warmup_epochs > 0:
-        print(f"Phase 1: projection warmup for {projection_warmup_epochs} epoch(s), "
-              f"lr={projection_lr:.2e}")
-        optimizer, scheduler = _setup_projection_phase()
-    else:
-        optimizer, scheduler = _setup_cpt_phase()
-
-    # Resume from checkpoint if requested
-    os.makedirs(output_dir, exist_ok=True)
-    global_step = 0
-    start_epoch = 0
-    loss_history = []
 
     resume_ckpt_path = os.path.join(output_dir, "training_state.pt")
     if resume and os.path.exists(resume_ckpt_path):
         print(f"Resuming from {resume_ckpt_path}...")
         ckpt = torch.load(resume_ckpt_path, map_location=device, weights_only=False)
-        model.load_state_dict(ckpt["model"])
+        epoch = ckpt["epoch"]
         global_step = ckpt["global_step"]
-        start_epoch = ckpt["epoch"]
-        loss_history = ckpt.get("loss_history", [])
-        # Re-setup the right phase before restoring optimizer/scheduler
-        if start_epoch < projection_warmup_epochs:
-            optimizer, scheduler = _setup_projection_phase()
+        start_epoch = epoch
+
+        if start_epoch >= projection_warmup_epochs:
+            model.hubert.requires_grad_(True)
+            optimizer, scheduler = _setup_cpt_phase(lr=learning_rate)
         else:
-            optimizer, scheduler = _setup_cpt_phase()
+            optimizer, scheduler = _setup_projection_phase(lr=projection_lr)
+
+        model.load_state_dict(ckpt["model"])
+        loss_history = ckpt.get("loss_history", [])
         optimizer.load_state_dict(ckpt["optimizer"])
         scheduler.load_state_dict(ckpt["scheduler"])
         print(f"  Resumed at epoch {start_epoch+1}, global_step {global_step}")
-
-    def _save_training_state(next_epoch):
-        """Save full training state for resumability (epoch-level)."""
-        state = {
-            "model": model.state_dict(),
-            "optimizer": optimizer.state_dict(),
-            "scheduler": scheduler.state_dict(),
-            "global_step": global_step,
-            "epoch": next_epoch,
-            "loss_history": loss_history,
-        }
-        tmp = resume_ckpt_path + f".tmp{os.getpid()}"
-        torch.save(state, tmp)
-        os.rename(tmp, resume_ckpt_path)
 
     # Train
     print(f"Starting training (epochs {start_epoch+1}-{total_epochs})...")
 
     for epoch in range(start_epoch, total_epochs):
-        # Phase transition: projection warmup -> CPT
-        # Skip if we resumed directly into CPT (optimizer/scheduler already restored)
         if epoch == projection_warmup_epochs and projection_warmup_epochs > 0 and start_epoch < projection_warmup_epochs:
             print(f"\n--- Phase 2: CPT (unfreezing all layers), "
                   f"lr={learning_rate:.2e}, warmup={warmup_steps} steps ---")
-            optimizer, scheduler = _setup_cpt_phase()
+            optimizer, scheduler = _setup_cpt_phase(learning_rate)
             global_step = 0  # reset step counter for CPT warmup
             model.zero_grad()
 
-        # Rebuild dataset each epoch for a fresh iterator
-        dataset = build_pretraining_dataset(index_path=index_path, hf_token=hf_token,
-                                            cache_dir=cache_dir)
         data_loader = torch.utils.data.DataLoader(
             dataset,
             batch_size=batch_size,
@@ -392,12 +360,6 @@ def train_hubert(
                 "lr": f"{scheduler.get_last_lr()[0]:.2e}",
             })
 
-            if max_steps is not None and global_step >= max_steps:
-                print(f"\nReached max_steps={max_steps}, stopping.")
-                _save_training_state(epoch)  # restart this epoch on resume
-                _save_loss_plot(loss_history, output_dir)
-                return
-
         avg = epoch_loss / max(num_batches, 1)
         print(f"Epoch {epoch + 1} done. avg_loss={avg:.4f}, "
               f"batches={num_batches}, global_step={global_step}")
@@ -406,7 +368,7 @@ def train_hubert(
         ckpt_path = os.path.join(output_dir, f"hubert_epoch_{epoch + 1}.pt")
         print(f"Saving epoch checkpoint to {ckpt_path}")
         torch.save(model.state_dict(), ckpt_path)
-        _save_training_state(epoch + 1)
+        _save_training_state(epoch=epoch+1, model=model, optimizer=optimizer, scheduler=scheduler, global_step=global_step, out=output_dir/"training_state.pt", loss_history=loss_history)
         _save_loss_plot(loss_history, output_dir)
 
     print("Training completed!")
@@ -457,7 +419,6 @@ if __name__ == "__main__":
         num_epochs=args.num_epochs,
         learning_rate=args.learning_rate,
         hf_token=hf_token,
-        max_steps=args.max_steps,
         output_dir=args.output_dir,
         cache_dir=args.cache_dir,
         grad_accum_steps=args.grad_accum_steps,
