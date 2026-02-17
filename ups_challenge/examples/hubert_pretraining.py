@@ -199,7 +199,7 @@ def _setup_projection_phase(lr: float, model: HubertForPreTraining):
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda step: 1.0)
     return opt, sched
 
-def _setup_cpt_phase(lr: float, model: HubertForPreTraining ):
+def _setup_cpt_phase(lr: float, warmup_steps:int, model: HubertForPreTraining ):
     """Phase 2: unfreeze everything, train with warmup."""
     opt = torch.optim.AdamW(model.parameters(), lr=lr)
     sched = torch.optim.lr_scheduler.LambdaLR(
@@ -272,7 +272,7 @@ def train_hubert(
 
         if start_epoch >= projection_warmup_epochs:
             model.hubert.requires_grad_(True)
-            optimizer, scheduler = _setup_cpt_phase(lr=learning_rate, model=model)
+            optimizer, scheduler = _setup_cpt_phase(lr=learning_rate, warmup_steps=warmup_steps, model=model)
         else:
             optimizer, scheduler = _setup_projection_phase(lr=projection_lr, model=model)
 
@@ -290,7 +290,7 @@ def train_hubert(
             print(f"\n--- Phase 2: CPT (unfreezing all layers), "
                   f"lr={learning_rate:.2e}, warmup={warmup_steps} steps ---")
             model.hubert.requires_grad_(True)
-            optimizer, scheduler = _setup_cpt_phase(learning_rate, model)
+            optimizer, scheduler = _setup_cpt_phase(lr=learning_rate, warmup_steps=warmup_steps, model=model)
             global_step = 0  # reset step counter for CPT warmup
             model.zero_grad()
 
