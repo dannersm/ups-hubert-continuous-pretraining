@@ -44,7 +44,7 @@ Steps 5-6 are the core **curation strategy**: tars are scored by VAD density and
 Both **assign_labels** (Step 6) and **HuBERT pre-training** (Step 7) are fully resumable:
 
 - **assign_labels** checkpoints every N tars. If the Colab session crashes, re-running the cell picks up from the last checkpoint.
-- **HuBERT pre-training** saves `training_state.pt` every 500 optimizer steps. Uncomment the `--resume` flag in the training cell to resume from the last checkpoint.
+- **HuBERT pre-training** saves `training_state.pt` at the end of each epoch. The notebook includes the `--resume` flag by default, so if you restart the cell, it will automatically look for a checkpoint and resume training from the last completed epoch.
 
 ## Batch Size by GPU
 
@@ -62,10 +62,15 @@ The notebook auto-detects VRAM and sets batch size accordingly:
 ```
 ups_challenge/
 ├── dataloaders/
-│   └── masked_pretraining.py       # WebDataset dataloader (single stream + shuffle buffer)
-├── inference/
+│   ├── masked_pretraining.py       # WebDataset dataloader for HuBERT
+│   └── wav2vec_pretraining.py      # (Experimental) Dataloader for Wav2Vec 2.0
+├── models/
+│   ├── hubert.py                   # HuBERT model definition (Encoder + Projection)
+│   └── omniasr.py                  # (Experimental) OmniASR model utilities
+├── training/
 │   ├── assign_labels.py            # Incremental k-means + label assignment (resumable)
-│   └── hubert_pretraining.py       # HuBERT masked pre-training loop (resumable)
+│   ├── hubert_pretraining.py       # HuBERT masked pre-training loop (resumable)
+│   └── wav2vec_pretraining.py      # (Experimental) Wav2Vec 2.0 pre-training loop
 └── preprocessing/
     ├── build_chunk_index.py        # Curated chunk selection with VAD + language scoring
     ├── build_lang_index.py         # Builds LID index from lang_id_results.jsonl
@@ -101,7 +106,7 @@ Google Drive (MyDrive/ups-challenge/)
 - **`--n_clusters`** (Step 6): Number of k-means clusters for pseudo-labels (default: 100).
 - **`--num_epochs`** (Step 7): Training epochs (default: 4).
 - **`--learning_rate`** (Step 7): Learning rate (default: 5e-5).
-- **`--save_every_steps`** (Step 7): Checkpoint frequency (default: 500).
+- **`--save_every_tars`** (Step 6): Checkpoint frequency for label assignment (default: 5).
 
 ## Cleaning Up Space
 

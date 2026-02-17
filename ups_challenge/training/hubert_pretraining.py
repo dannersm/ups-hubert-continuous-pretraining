@@ -5,7 +5,7 @@ Masks ~57 % of frames (span masking, p=0.08 starts × l=10 length) and trains a 
 on the masked positions.
 
 Usage:
-    python -m ups_challenge.inference.hubert_pretraining \
+    python -m ups_challenge.training.hubert_pretraining \
         --index_path ./data/pretraining_index_100h.pkl \
         --num_clusters 100 --batch_size 8 --max_steps 1000
 """

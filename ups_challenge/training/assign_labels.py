@@ -10,7 +10,7 @@ tars containing the KMeans model, running normalisation stats, completed tars,
 and labels assigned so far.
 
 Usage:
-    python -m ups_challenge.inference.assign_labels \\
+    python -m ups_challenge.training.assign_labels \\
         --index ./data/chunk_index_100h.pkl \\
         --n_clusters 100 --output_dir ./data \\
         --hf_token $HF_TOKEN
