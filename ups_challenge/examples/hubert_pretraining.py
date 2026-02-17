@@ -289,6 +289,7 @@ def train_hubert(
         if epoch == projection_warmup_epochs and projection_warmup_epochs > 0 and start_epoch < projection_warmup_epochs:
             print(f"\n--- Phase 2: CPT (unfreezing all layers), "
                   f"lr={learning_rate:.2e}, warmup={warmup_steps} steps ---")
+            model.hubert.requires_grad_(True)
             optimizer, scheduler = _setup_cpt_phase(learning_rate)
             global_step = 0  # reset step counter for CPT warmup
             model.zero_grad()
