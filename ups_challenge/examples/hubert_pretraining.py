@@ -295,7 +295,7 @@ def train_hubert(
             model.zero_grad()
 
         data_loader = torch.utils.data.DataLoader(
-            dataset,
+            build_pretraining_dataset(index_path=index_path, cache_dir=cache_dir),
             batch_size=batch_size,
             num_workers=num_workers,
             collate_fn=collate_pretraining,
