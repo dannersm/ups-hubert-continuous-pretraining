@@ -6,7 +6,7 @@ Reads all .pkl files in vad_shards/, computes for each tar:
 Saves a dict {tar_number: density} to data/vad_density_index.pkl.
 
 Usage:
-    python -m ups_challenge.examples.build_vad_density_index \
+    python -m ups_challenge.preprocessing.build_vad_density_index \
         --vad_base_dir ./data/vad_shards \
         --output ./data/vad_density_index.pkl
 """

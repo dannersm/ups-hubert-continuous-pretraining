@@ -22,13 +22,13 @@ Prerequisites:
   - ups_challenge/examples/lang_speech_hours.json
 
 Usage:
-    python -m ups_challenge.examples.build_chunk_index \\
+    python -m ups_challenge.preprocessing.build_chunk_index \\
         --total_hours 100 \\
         --min_vad_ratio 0.5 \\
         --vad_base_dir ./data/vad_shards \\
         --vad_density_index ./data/vad_density_index.pkl \\
         --lid_index_path ./data/lid_index.pkl \\
-        --lang_hours_path ./ups_challenge/examples/lang_speech_hours.json \\
+        --lang_hours_path ./ups_challenge/preprocessing/lang_speech_hours.json \\
         --output ./data/chunk_index_100h.pkl
 """
 
@@ -118,7 +118,7 @@ def main():
                         help="Pre-computed density index (build_vad_density_index.py)")
     parser.add_argument("--lid_index_path", type=str, default="./data/lid_index.pkl")
     parser.add_argument("--lang_hours_path", type=str,
-                        default="./ups_challenge/examples/lang_speech_hours.json")
+                        default="./ups_challenge/preprocessing/lang_speech_hours.json")
     parser.add_argument("--output", type=str, default="./data/chunk_index_{hours}h.pkl",
                         help="Output path; {hours} is replaced with --total_hours value")
     args = parser.parse_args()

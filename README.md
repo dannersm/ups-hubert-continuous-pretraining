@@ -62,15 +62,15 @@ The notebook auto-detects VRAM and sets batch size accordingly:
 ```
 ups_challenge/
 ├── dataloaders/
-│   ├── build_index.py              # Builds LID index from lang_id_results.jsonl
 │   └── masked_pretraining.py       # WebDataset dataloader (single stream + shuffle buffer)
-├── examples/
+├── inference/
 │   ├── assign_labels.py            # Incremental k-means + label assignment (resumable)
-│   ├── build_chunk_index.py        # Curated chunk selection with VAD + language scoring
-│   ├── build_vad_density_index.py  # Per-tar VAD density computation
-│   ├── hubert_pretraining.py       # HuBERT masked pre-training loop (resumable)
-│   └── lang_speech_hours.json      # Hours per language in the dataset
-└── vad_analysis/
+│   └── hubert_pretraining.py       # HuBERT masked pre-training loop (resumable)
+└── preprocessing/
+    ├── build_chunk_index.py        # Curated chunk selection with VAD + language scoring
+    ├── build_lang_index.py         # Builds LID index from lang_id_results.jsonl
+    ├── build_vad_density_index.py  # Per-tar VAD density computation
+    ├── lang_speech_hours.json      # Hours per language in the dataset
     └── vad_lookup.py               # Parses vad_results.jsonl into per-tar sharded .pkl
 
 colab_hubert_pretraining.ipynb      # Main orchestrator notebook

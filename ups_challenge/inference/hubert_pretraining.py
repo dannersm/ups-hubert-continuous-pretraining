@@ -1,11 +1,11 @@
 """HuBERT masked speech pre-training.
 
-Uses a pre-built index with k-means labels (from prepare_pretraining_index.py).
+Uses a pre-built index with k-means labels (from assign_labels.py).
 Masks ~57 % of frames (span masking, p=0.08 starts × l=10 length) and trains a cross-entropy prediction head
 on the masked positions.
 
 Usage:
-    python -m ups_challenge.examples.hubert_pretraining \
+    python -m ups_challenge.inference.hubert_pretraining \
         --index_path ./data/pretraining_index_100h.pkl \
         --num_clusters 100 --batch_size 8 --max_steps 1000
 """
@@ -16,7 +16,6 @@ import os
 from pathlib import Path
 
 import matplotlib.pyplot as plt
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -27,7 +26,7 @@ from dotenv import load_dotenv
 
 from ups_challenge.dataloaders.masked_pretraining import (
     build_pretraining_dataset,
-    collate_pretraining,
+    collate_fn,
 )
 
 load_dotenv()
@@ -298,7 +297,7 @@ def train_hubert(
             build_pretraining_dataset(index_path=index_path, cache_dir=cache_dir),
             batch_size=batch_size,
             num_workers=num_workers,
-            collate_fn=collate_pretraining,
+            collate_fn=collate_fn,
         )
 
         epoch_loss = 0.0
