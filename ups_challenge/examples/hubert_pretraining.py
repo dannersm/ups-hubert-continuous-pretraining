@@ -46,7 +46,7 @@ def compute_span_mask(shape, mask_prob, mask_length, attention_mask=None, device
         device: Torch device.
     """
     valid_mask = attention_mask if attention_mask is not None else torch.ones(shape)
-    probs = torch.full(shape, mask_prob, device=device) * valid_mask,float()
+    probs = torch.full(shape, mask_prob, device=device) * valid_mask.float()
     mask_starts = torch.bernoulli(probs) # [B, T] (float for conv)
     
     if mask_starts.sum() == 0:

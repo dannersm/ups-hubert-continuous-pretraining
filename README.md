@@ -63,7 +63,7 @@ The notebook auto-detects VRAM and sets batch size accordingly:
 ups_challenge/
 ├── dataloaders/
 │   ├── build_index.py              # Builds LID index from lang_id_results.jsonl
-│   └── masked_pretraining.py       # WebDataset dataloader (multilang RandomMix)
+│   └── masked_pretraining.py       # WebDataset dataloader (single stream + shuffle buffer)
 ├── examples/
 │   ├── assign_labels.py            # Incremental k-means + label assignment (resumable)
 │   ├── build_chunk_index.py        # Curated chunk selection with VAD + language scoring
