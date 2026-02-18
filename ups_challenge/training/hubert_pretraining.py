@@ -90,6 +90,8 @@ def train_hubert(
     if projection_lr is None:
         projection_lr = learning_rate
 
+    loss_history = []
+
     resume_ckpt_path = os.path.join(output_dir, "training_state.pt")
     if resume and os.path.exists(resume_ckpt_path):
         print(f"Resuming from {resume_ckpt_path}...")
@@ -109,6 +111,11 @@ def train_hubert(
         optimizer.load_state_dict(ckpt["optimizer"])
         scheduler.load_state_dict(ckpt["scheduler"])
         print(f"  Resumed at epoch {start_epoch+1}, global_step {global_step}")
+    elif projection_warmup_epochs > 0:
+        optimizer, scheduler = _setup_projection_phase(lr=projection_lr, model=model)
+    else:
+        model.hubert.requires_grad_(True)
+        optimizer, scheduler = _setup_cpt_phase(lr=learning_rate, warmup_steps=warmup_steps, model=model)
 
     # Train
     print(f"Starting training (epochs {start_epoch+1}-{total_epochs})...")
