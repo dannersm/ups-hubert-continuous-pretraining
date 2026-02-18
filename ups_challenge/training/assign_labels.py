@@ -158,6 +158,8 @@ class EmbeddingExtractor:
             for j, wav in enumerate(chunk):
                 wav_len = len(wav)
                 enc_len = self.model._get_feat_extract_output_lengths(wav_len)
+                if isinstance(enc_len, torch.Tensor):
+                    enc_len = enc_len.item()
                 results.append(hidden[j, :enc_len].cpu().numpy())
         return results
 
@@ -211,8 +213,9 @@ def main():
     parser.add_argument("--embedding_model", type=str, default=None,
                         help="HF model name for embedding extraction (required when "
                              "feature_type=embedding)")
-    parser.add_argument("--embedding_layer", type=int, default=6,
-                        help="0-indexed hidden layer to extract (default: 6)")
+    parser.add_argument("--embedding_layer", type=int, default=9,
+                        help="0-indexed hidden layer to extract (default: 9, "
+                             "per WavLM paper section 5)")
     parser.add_argument("--embedding_batch_size", type=int, default=32,
                         help="Chunks per GPU batch for embedding extraction (default: 32)")
     parser.add_argument("--embedding_device", type=str, default=None,
@@ -351,24 +354,24 @@ def main():
         # Process features in micro-batches to avoid OOM on large tars
         BATCH_SIZE = 2000  # chunks per micro-batch (~300 MB peak)
         # Stores (idx, feature_array_or_waveform) depending on feature_type
-        batch_mfccs: list[tuple[int, np.ndarray]] = []
+        pending_chunks: list[tuple[int, np.ndarray]] = []
 
         def _flush_batch():
             """Process accumulated micro-batch: stats, partial_fit, predict."""
             nonlocal kmeans_initialized, collected_count
-            if not batch_mfccs:
+            if not pending_chunks:
                 return
 
             if embedding_extractor is not None:
                 # Embedding mode: run GPU batched extraction on raw waveforms
-                waveforms_batch = [w for _, w in batch_mfccs]
+                waveforms_batch = [w for _, w in pending_chunks]
                 features_list = embedding_extractor.extract(waveforms_batch)
                 all_frames = np.concatenate(features_list, axis=0)
-                per_chunk = [(idx, feat) for (idx, _), feat in zip(batch_mfccs, features_list)]
+                per_chunk = [(idx, feat) for (idx, _), feat in zip(pending_chunks, features_list)]
             else:
                 # MFCC mode: features are already computed
-                all_frames = np.concatenate([m for _, m in batch_mfccs], axis=0)
-                per_chunk = batch_mfccs
+                all_frames = np.concatenate([m for _, m in pending_chunks], axis=0)
+                per_chunk = pending_chunks
 
             stats.update_batch(all_frames)
 
@@ -388,7 +391,7 @@ def main():
                 pbar.update(1)
 
             del all_frames, normalized
-            batch_mfccs.clear()
+            pending_chunks.clear()
 
         for mp3_bytes, key, _url in dataset:
             idxs = tar_lookup.get(os.path.basename(key))
@@ -415,16 +418,16 @@ def main():
                 if embedding_extractor is not None:
                     # Store raw waveform as numpy; embedding extracted in _flush_batch
                     wav_np = waveform.numpy() if isinstance(waveform, torch.Tensor) else np.asarray(waveform, dtype=np.float32)
-                    batch_mfccs.append((idx, wav_np))
+                    pending_chunks.append((idx, wav_np))
                 else:
                     mfcc = extract_mfcc(waveform, sample_rate=sr)
-                    batch_mfccs.append((idx, mfcc))
+                    pending_chunks.append((idx, mfcc))
 
                 if not first_chunk_logged:
                     pbar.write(f"  First chunk arrived after {time.time()-t0:.1f}s")
                     first_chunk_logged = True
 
-            if len(batch_mfccs) >= BATCH_SIZE:
+            if len(pending_chunks) >= BATCH_SIZE:
                 _flush_batch()
 
         # Flush remaining chunks for this tar
