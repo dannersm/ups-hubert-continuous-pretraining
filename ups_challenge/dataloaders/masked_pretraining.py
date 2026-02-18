@@ -1,6 +1,6 @@
 """Dataloader for HuBERT masked pre-training.
 
-Reads a pre-built index (from prepare_pretraining_index.py) that maps
+Reads a pre-built index (from assign_labels.py) that maps
 (tar_number, key) -> {start_sec, end_sec, labels, language}.  Streams audio
 from HuggingFace tars via WebDataset, extracts the specific chunk for each
 matching file, and returns (waveform, labels) pairs.
@@ -126,7 +126,7 @@ def _decode_pretraining(sample, lookup, target_sr=16000):
     return results
 
 
-def collate_pretraining(batch):
+def collate_fn(batch):
     """Stack waveforms -> [B, T], pad labels -> [B, max_frames] (pad=-100)."""
     batch = [b for b in batch if b is not None]
     if not batch:
