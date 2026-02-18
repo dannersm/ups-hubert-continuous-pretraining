@@ -210,7 +210,7 @@ def main():
     parser.add_argument("--feature_type", type=str, default="mfcc",
                         choices=["mfcc", "embedding"],
                         help="Feature type for k-means: mfcc (default) or embedding")
-    parser.add_argument("--embedding_model", type=str, default=None,
+    parser.add_argument("--embedding_model", type=str, default="facebook/hubert-base-ls960",
                         help="HF model name for embedding extraction (required when "
                              "feature_type=embedding)")
     parser.add_argument("--embedding_layer", type=int, default=9,
