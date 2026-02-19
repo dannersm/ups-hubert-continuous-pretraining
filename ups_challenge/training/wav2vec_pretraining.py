@@ -14,8 +14,13 @@ import os
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import numpy as np
 import torch
 from transformers import AutoFeatureExtractor
+from transformers.models.wav2vec2.modeling_wav2vec2 import (
+    _compute_mask_indices,
+    _sample_negative_indices,
+)
 from tqdm import tqdm
 from dotenv import load_dotenv
 
@@ -183,10 +188,30 @@ def train_wav2vec(
             if attention_mask is not None:
                 attention_mask = attention_mask.to(device)
 
-            # Forward — model handles masking, quantization, contrastive + diversity loss
+            # Compute mask indices explicitly (Wav2Vec2ForPreTraining needs these
+            # to be passed in; otherwise loss is None)
+            batch_size, raw_seq_len = input_values.shape
+            seq_len = model._get_feat_extract_output_lengths(raw_seq_len).item()
+
+            mask_time_indices = _compute_mask_indices(
+                shape=(batch_size, seq_len),
+                mask_prob=model.config.mask_time_prob,
+                mask_length=model.config.mask_time_length,
+            )
+            sampled_negative_indices = _sample_negative_indices(
+                features_shape=(batch_size, seq_len),
+                num_negatives=model.config.num_negatives,
+                mask_time_indices=mask_time_indices,
+            )
+            mask_time_indices = torch.tensor(mask_time_indices, device=device, dtype=torch.bool)
+            sampled_negative_indices = torch.tensor(sampled_negative_indices, device=device, dtype=torch.long)
+
+            # Forward
             outputs = model(
                 input_values=input_values,
                 attention_mask=attention_mask,
+                mask_time_indices=mask_time_indices,
+                sampled_negative_indices=sampled_negative_indices,
             )
             loss = outputs.loss / grad_accum_steps
 
