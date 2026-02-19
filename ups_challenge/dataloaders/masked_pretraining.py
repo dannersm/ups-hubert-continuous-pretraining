@@ -17,7 +17,6 @@ import subprocess
 import numpy as np
 import torch
 import webdataset as wds
-from torchcodec.decoders import AudioDecoder
 
 # ---------------------------------------------------------------------------
 # Error tracking (per-worker counters, logged with rate limiting)
@@ -46,9 +45,10 @@ def _download_tar(tar_number, hf_token, cache_dir):
         f"unsupervised_peoples_speech/resolve/main/{folder}/{tn_str}.tar?download=True"
     )
     os.makedirs(cache_dir, exist_ok=True)
-    temp = dest + f".tmp{os.getpid()}"
+    temp = dest + ".partial"
     subprocess.run(
-        ["curl", "-s", "-L", "-o", temp, "-H", f"Authorization:Bearer {hf_token}", url],
+        ["curl", "-s", "-L", "-C", "-", "--retry", "5", "--retry-delay", "10",
+         "-o", temp, "-H", f"Authorization:Bearer {hf_token}", url],
         check=True,
     )
     os.rename(temp, dest)
@@ -102,6 +102,7 @@ def _decode_pretraining(sample, lookup, target_sr=16000):
 
     results = []
     try:
+        from torchcodec.decoders import AudioDecoder
         decoder = AudioDecoder(source=mp3_bytes, sample_rate=target_sr, num_channels=1)
         full_audio = decoder.get_all_samples().data.squeeze(0)
 

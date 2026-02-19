@@ -35,6 +35,7 @@ import webdataset as wds
 from sklearn.cluster import MiniBatchKMeans
 from torchcodec.decoders import AudioDecoder
 from tqdm import tqdm
+from transformers import AutoFeatureExtractor, AutoConfig, AutoModel
 
 
 # ---------------------------------------------------------------------------
@@ -110,6 +111,60 @@ class RunningStats:
 
 
 # ---------------------------------------------------------------------------
+# Embedding extractor
+# ---------------------------------------------------------------------------
+
+class EmbeddingExtractor:
+    """GPU-batched hidden-state extraction from a HuggingFace speech model."""
+
+    def __init__(self, model_name, layer_idx, device, batch_size=32):
+        self.feature_extractor = AutoFeatureExtractor.from_pretrained(model_name)
+        config = AutoConfig.from_pretrained(model_name)
+        self.model = (
+            AutoModel.from_pretrained(model_name, config=config)
+            .to(device)
+            .eval()
+        )
+        self.layer_idx = layer_idx
+        self.device = device
+        self.batch_size = batch_size
+        self.hidden_size = config.hidden_size
+
+    def extract(self, waveforms: list) -> list:
+        """Batch-GPU extract hidden states from the specified layer.
+
+        Args:
+            waveforms: list of numpy arrays, each shape (T_i,).
+
+        Returns:
+            list of (T_i_enc, hidden_size) numpy arrays.
+        """
+        results = []
+        for i in range(0, len(waveforms), self.batch_size):
+            chunk = waveforms[i: i + self.batch_size]
+            inputs = self.feature_extractor(
+                chunk,
+                sampling_rate=16000,
+                padding=True,
+                return_tensors="pt",
+            )
+            with torch.no_grad():
+                out = self.model(
+                    inputs.input_values.to(self.device),
+                    attention_mask=inputs.get("attention_mask", None),
+                    output_hidden_states=True,
+                )
+            hidden = out.hidden_states[self.layer_idx]  # [B, T, D]
+            for j, wav in enumerate(chunk):
+                wav_len = len(wav)
+                enc_len = self.model._get_feat_extract_output_lengths(wav_len)
+                if isinstance(enc_len, torch.Tensor):
+                    enc_len = enc_len.item()
+                results.append(hidden[j, :enc_len].cpu().numpy())
+        return results
+
+
+# ---------------------------------------------------------------------------
 # Tar download
 # ---------------------------------------------------------------------------
 
@@ -152,11 +207,44 @@ def main():
     parser.add_argument("--target_sr", type=int, default=16000)
     parser.add_argument("--save_every_tars", type=int, default=5,
                         help="Save checkpoint every N tars processed")
+    parser.add_argument("--feature_type", type=str, default="mfcc",
+                        choices=["mfcc", "embedding"],
+                        help="Feature type for k-means: mfcc (default) or embedding")
+    parser.add_argument("--embedding_model", type=str, default="facebook/hubert-base-ls960",
+                        help="HF model name for embedding extraction (required when "
+                             "feature_type=embedding)")
+    parser.add_argument("--embedding_layer", type=int, default=9,
+                        help="0-indexed hidden layer to extract (default: 9, "
+                             "per WavLM paper section 5)")
+    parser.add_argument("--embedding_batch_size", type=int, default=32,
+                        help="Chunks per GPU batch for embedding extraction (default: 32)")
+    parser.add_argument("--embedding_device", type=str, default=None,
+                        help="Device for embedding model: 'cuda' or 'cpu' "
+                             "(default: auto-detect)")
     args = parser.parse_args()
 
     hf_token = args.hf_token or os.getenv("HF_TOKEN")
     if not hf_token:
         raise ValueError("Set HF_TOKEN env var or pass --hf_token")
+
+    # Feature extraction setup
+    embedding_extractor = None
+    if args.feature_type == "embedding":
+        if not args.embedding_model:
+            raise ValueError("--embedding_model is required when --feature_type=embedding")
+        emb_device = args.embedding_device or ("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"Loading embedding model: {args.embedding_model} "
+              f"(layer {args.embedding_layer}, device {emb_device})")
+        embedding_extractor = EmbeddingExtractor(
+            model_name=args.embedding_model,
+            layer_idx=args.embedding_layer,
+            device=emb_device,
+            batch_size=args.embedding_batch_size,
+        )
+        n_features = embedding_extractor.hidden_size
+        print(f"  Embedding hidden size: {n_features}")
+    else:
+        n_features = 39
 
     # ------------------------------------------------------------------
     # Load index
@@ -189,7 +277,7 @@ def main():
 
     completed_tars: set = set()
     labels_dict: dict[int, np.ndarray] = {}  # idx -> labels array
-    stats = RunningStats(n_features=39)
+    stats = RunningStats(n_features=n_features)
     kmeans = MiniBatchKMeans(n_clusters=args.n_clusters, batch_size=1024,
                              random_state=42, n_init=3)
     kmeans_initialized = False
@@ -226,7 +314,7 @@ def main():
         os.rename(tmp, ckpt_path)
 
     # ------------------------------------------------------------------
-    # Single-pass: extract MFCCs, partial_fit KMeans, predict labels
+    # Single-pass: extract features, partial_fit KMeans, predict labels
     # ------------------------------------------------------------------
     pbar = tqdm(total=len(index_entries), initial=collected_count,
                 desc="Chunks processed", unit="chunk")
@@ -263,16 +351,28 @@ def main():
                       handler=wds.handlers.ignore_and_continue)
         )
 
-        # Process MFCCs in micro-batches to avoid OOM on large tars
+        # Process features in micro-batches to avoid OOM on large tars
         BATCH_SIZE = 2000  # chunks per micro-batch (~300 MB peak)
-        batch_mfccs: list[tuple[int, np.ndarray]] = []
+        # Stores (idx, feature_array_or_waveform) depending on feature_type
+        pending_chunks: list[tuple[int, np.ndarray]] = []
 
         def _flush_batch():
             """Process accumulated micro-batch: stats, partial_fit, predict."""
             nonlocal kmeans_initialized, collected_count
-            if not batch_mfccs:
+            if not pending_chunks:
                 return
-            all_frames = np.concatenate([m for _, m in batch_mfccs], axis=0)
+
+            if embedding_extractor is not None:
+                # Embedding mode: run GPU batched extraction on raw waveforms
+                waveforms_batch = [w for _, w in pending_chunks]
+                features_list = embedding_extractor.extract(waveforms_batch)
+                all_frames = np.concatenate(features_list, axis=0)
+                per_chunk = [(idx, feat) for (idx, _), feat in zip(pending_chunks, features_list)]
+            else:
+                # MFCC mode: features are already computed
+                all_frames = np.concatenate([m for _, m in pending_chunks], axis=0)
+                per_chunk = pending_chunks
+
             stats.update_batch(all_frames)
 
             current_std = stats.std + 1e-8
@@ -282,8 +382,8 @@ def main():
             kmeans_initialized = True
 
             offset = 0
-            for idx, mfcc in batch_mfccs:
-                n_frames = mfcc.shape[0]
+            for idx, feat in per_chunk:
+                n_frames = feat.shape[0]
                 chunk_norm = normalized[offset:offset + n_frames]
                 labels_dict[idx] = kmeans.predict(chunk_norm).astype(np.int16)
                 offset += n_frames
@@ -291,7 +391,7 @@ def main():
                 pbar.update(1)
 
             del all_frames, normalized
-            batch_mfccs.clear()
+            pending_chunks.clear()
 
         for mp3_bytes, key, _url in dataset:
             idxs = tar_lookup.get(os.path.basename(key))
@@ -315,14 +415,19 @@ def main():
                 if waveform.shape[0] == 0:
                     continue
 
-                mfcc = extract_mfcc(waveform, sample_rate=sr)
-                batch_mfccs.append((idx, mfcc))
+                if embedding_extractor is not None:
+                    # Store raw waveform as numpy; embedding extracted in _flush_batch
+                    wav_np = waveform.numpy() if isinstance(waveform, torch.Tensor) else np.asarray(waveform, dtype=np.float32)
+                    pending_chunks.append((idx, wav_np))
+                else:
+                    mfcc = extract_mfcc(waveform, sample_rate=sr)
+                    pending_chunks.append((idx, mfcc))
 
                 if not first_chunk_logged:
                     pbar.write(f"  First chunk arrived after {time.time()-t0:.1f}s")
                     first_chunk_logged = True
 
-            if len(batch_mfccs) >= BATCH_SIZE:
+            if len(pending_chunks) >= BATCH_SIZE:
                 _flush_batch()
 
         # Flush remaining chunks for this tar
