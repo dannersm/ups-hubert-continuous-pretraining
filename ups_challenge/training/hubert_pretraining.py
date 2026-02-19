@@ -100,7 +100,7 @@ def train_hubert(
         global_step = ckpt["global_step"]
         start_epoch = epoch
 
-        if start_epoch >= projection_warmup_epochs:
+        if start_epoch > projection_warmup_epochs:
             model.hubert.requires_grad_(True)
             optimizer, scheduler = _setup_cpt_phase(lr=learning_rate, warmup_steps=warmup_steps, model=model)
         else:
@@ -121,7 +121,7 @@ def train_hubert(
     print(f"Starting training (epochs {start_epoch+1}-{total_epochs})...")
 
     for epoch in range(start_epoch, total_epochs):
-        if epoch == projection_warmup_epochs and projection_warmup_epochs > 0 and start_epoch < projection_warmup_epochs:
+        if epoch == projection_warmup_epochs and projection_warmup_epochs > 0:
             print(f"\n--- Phase 2: CPT (unfreezing all layers), "
                   f"lr={learning_rate:.2e}, warmup={warmup_steps} steps ---")
             model.hubert.requires_grad_(True)
