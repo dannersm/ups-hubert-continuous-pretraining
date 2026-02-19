@@ -50,7 +50,7 @@ def _decode_chunks(sample, lookup, target_sr=16000):
     try:
         # Load MP3 from bytes
         with io.BytesIO(mp3_bytes) as f:
-            full_audio, sr = torchaudio.load(f, format="mp3")
+            full_audio, sr = torchaudio.load(f)
 
         # Resample if necessary
         if sr != target_sr:
