@@ -56,3 +56,14 @@ def _setup_cpt_phase(lr, warmup_steps, model):
         lambda step: min(1.0, float(step) / float(max(1, warmup_steps))),
     )
     return opt, sched
+
+
+def _setup_lora_cpt_phase(lr, warmup_steps, model):
+    """Phase 2 (LoRA): train only LoRA adapters + projection with linear warmup."""
+    trainable = [p for p in model.parameters() if p.requires_grad]
+    opt = torch.optim.AdamW(trainable, lr=lr)
+    sched = torch.optim.lr_scheduler.LambdaLR(
+        opt,
+        lambda step: min(1.0, float(step) / float(max(1, warmup_steps))),
+    )
+    return opt, sched

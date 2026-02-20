@@ -32,6 +32,7 @@ from ups_challenge.training.training_utils import (
     _save_training_state,
     _setup_projection_phase,
     _setup_cpt_phase,
+    _setup_lora_cpt_phase,
 )
 
 load_dotenv()
@@ -57,6 +58,11 @@ def train_hubert(
     resume=False,
     projection_warmup_epochs=0,
     projection_lr=None,
+    use_lora=False,
+    lora_rank=16,
+    lora_alpha=32,
+    lora_target_modules=None,
+    use_rslora=False,
 ):
     # Device
     if device is None:
@@ -72,6 +78,11 @@ def train_hubert(
         num_clusters=num_clusters,
         mask_time_prob=mask_time_prob,
         mask_time_length=mask_time_length,
+        use_lora=use_lora,
+        lora_rank=lora_rank,
+        lora_alpha=lora_alpha,
+        lora_target_modules=lora_target_modules,
+        use_rslora=use_rslora,
     )
     feature_extractor = AutoFeatureExtractor.from_pretrained(model_name)
     model.to(device)
@@ -101,8 +112,11 @@ def train_hubert(
         start_epoch = epoch
 
         if start_epoch > projection_warmup_epochs:
-            model.hubert.requires_grad_(True)
-            optimizer, scheduler = _setup_cpt_phase(lr=learning_rate, warmup_steps=warmup_steps, model=model)
+            if use_lora:
+                optimizer, scheduler = _setup_lora_cpt_phase(lr=learning_rate, warmup_steps=warmup_steps, model=model)
+            else:
+                model.hubert.requires_grad_(True)
+                optimizer, scheduler = _setup_cpt_phase(lr=learning_rate, warmup_steps=warmup_steps, model=model)
         else:
             optimizer, scheduler = _setup_projection_phase(lr=projection_lr, model=model)
 
@@ -115,18 +129,26 @@ def train_hubert(
     elif projection_warmup_epochs > 0:
         optimizer, scheduler = _setup_projection_phase(lr=projection_lr, model=model)
     else:
-        model.hubert.requires_grad_(True)
-        optimizer, scheduler = _setup_cpt_phase(lr=learning_rate, warmup_steps=warmup_steps, model=model)
+        if use_lora:
+            optimizer, scheduler = _setup_lora_cpt_phase(lr=learning_rate, warmup_steps=warmup_steps, model=model)
+        else:
+            model.hubert.requires_grad_(True)
+            optimizer, scheduler = _setup_cpt_phase(lr=learning_rate, warmup_steps=warmup_steps, model=model)
 
     # Train
     print(f"Starting training (epochs {start_epoch+1}-{total_epochs})...")
 
     for epoch in range(start_epoch, total_epochs):
         if epoch == projection_warmup_epochs and projection_warmup_epochs > 0:
-            print(f"\n--- Phase 2: CPT (unfreezing all layers), "
-                  f"lr={learning_rate:.2e}, warmup={warmup_steps} steps ---")
-            model.hubert.requires_grad_(True)
-            optimizer, scheduler = _setup_cpt_phase(lr=learning_rate, warmup_steps=warmup_steps, model=model)
+            if use_lora:
+                print(f"\n--- Phase 2: LoRA CPT, "
+                      f"lr={learning_rate:.2e}, warmup={warmup_steps} steps ---")
+                optimizer, scheduler = _setup_lora_cpt_phase(lr=learning_rate, warmup_steps=warmup_steps, model=model)
+            else:
+                print(f"\n--- Phase 2: CPT (unfreezing all layers), "
+                      f"lr={learning_rate:.2e}, warmup={warmup_steps} steps ---")
+                model.hubert.requires_grad_(True)
+                optimizer, scheduler = _setup_cpt_phase(lr=learning_rate, warmup_steps=warmup_steps, model=model)
             global_step = 0  # reset step counter for CPT warmup
             model.zero_grad()
 
@@ -142,7 +164,12 @@ def train_hubert(
         micro_step = 0
         accum_loss = 0.0
 
-        phase_str = "proj" if epoch < projection_warmup_epochs else "CPT"
+        if epoch < projection_warmup_epochs:
+            phase_str = "proj"
+        elif use_lora:
+            phase_str = "LoRA"
+        else:
+            phase_str = "CPT"
         pbar = tqdm(data_loader, desc=f"Epoch {epoch + 1}/{total_epochs} [{phase_str}]")
         for batch_idx, batch in enumerate(pbar):
             if batch is None:
@@ -243,6 +270,18 @@ if __name__ == "__main__":
                         help="Epochs to train only projection head before CPT (default: 0)")
     parser.add_argument("--projection_lr", type=float, default=None,
                         help="LR for projection warmup phase (default: same as learning_rate)")
+    # LoRA
+    parser.add_argument("--use_lora", action="store_true",
+                        help="Use LoRA adapters instead of full fine-tuning")
+    parser.add_argument("--lora_rank", type=int, default=16,
+                        help="LoRA rank (default: 16)")
+    parser.add_argument("--lora_alpha", type=int, default=32,
+                        help="LoRA alpha scaling (default: 32)")
+    parser.add_argument("--lora_target_modules", type=str, nargs="+",
+                        default=None,
+                        help="LoRA target modules (default: q_proj k_proj v_proj out_proj)")
+    parser.add_argument("--use_rslora", action="store_true",
+                        help="Use RSLoRA (rank-stabilized scaling: alpha/sqrt(r) instead of alpha/r)")
     args = parser.parse_args()
 
     hf_token = args.hf_token or os.getenv("HF_TOKEN")
@@ -266,4 +305,9 @@ if __name__ == "__main__":
         resume=args.resume,
         projection_warmup_epochs=args.projection_warmup_epochs,
         projection_lr=args.projection_lr,
+        use_lora=args.use_lora,
+        lora_rank=args.lora_rank,
+        lora_alpha=args.lora_alpha,
+        lora_target_modules=args.lora_target_modules,
+        use_rslora=args.use_rslora,
     )

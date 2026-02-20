@@ -114,11 +114,33 @@ class WavLMForPreTraining(nn.Module):
         num_clusters=100,
         mask_time_prob=0.08,
         mask_time_length=10,
+        use_lora=False,
+        lora_rank=16,
+        lora_alpha=32,
+        lora_target_modules=None,
+        use_rslora=False,
     ):
         super().__init__()
         config = WavLMConfig.from_pretrained(model_name)
         config.apply_spec_augment = False  # avoid double masking
         self.wavlm = WavLMModel.from_pretrained(model_name, config=config)
+
+        self.use_lora = use_lora
+        if use_lora:
+            from peft import LoraConfig, get_peft_model
+            if lora_target_modules is None:
+                lora_target_modules = ["q_proj", "k_proj", "v_proj", "out_proj"]
+            peft_config = LoraConfig(
+                r=lora_rank,
+                lora_alpha=lora_alpha,
+                target_modules=lora_target_modules,
+                lora_dropout=0.05,
+                bias="none",
+                use_rslora=use_rslora,
+            )
+            self.wavlm = get_peft_model(self.wavlm, peft_config)
+            self.wavlm.print_trainable_parameters()
+
         self.projection = nn.Linear(config.hidden_size, num_clusters)
         self.mask_time_prob = mask_time_prob
         self.mask_time_length = mask_time_length
