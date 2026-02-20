@@ -155,12 +155,14 @@ class EmbeddingExtractor:
                     output_hidden_states=True,
                 )
             hidden = out.hidden_states[self.layer_idx]  # [B, T, D]
+            del out
             for j, wav in enumerate(chunk):
                 wav_len = len(wav)
                 enc_len = self.model._get_feat_extract_output_lengths(wav_len)
                 if isinstance(enc_len, torch.Tensor):
                     enc_len = enc_len.item()
                 results.append(hidden[j, :enc_len].cpu().numpy())
+            del hidden
         return results
 
 

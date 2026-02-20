@@ -147,6 +147,7 @@ def train_wav2vec(
         global_step = ckpt["global_step"]
         loss_history = ckpt.get("loss_history", [])
         gumbel_temp = ckpt.get("gumbel_temp", gumbel_max)
+        del ckpt
         print(f"  Resumed at epoch {start_epoch + 1}, global_step {global_step}, "
               f"gumbel_temp {gumbel_temp:.4f}")
 
@@ -213,10 +214,15 @@ def train_wav2vec(
                 mask_time_indices=mask_time_indices,
                 sampled_negative_indices=sampled_negative_indices,
             )
+            del input_values, attention_mask, mask_time_indices, sampled_negative_indices
+            del waveforms, inputs
             loss = outputs.loss / grad_accum_steps
+            codevector_perplexity = outputs.codevector_perplexity.item()
+            del outputs
 
             loss.backward()
             accum_loss += loss.item()
+            del loss
             micro_step += 1
 
             if micro_step % grad_accum_steps != 0:
@@ -228,7 +234,7 @@ def train_wav2vec(
             # Optimizer step
             optimizer.step()
             scheduler.step()
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
 
             # Gumbel temperature annealing
             global_step += 1
@@ -246,7 +252,7 @@ def train_wav2vec(
                 "avg": f"{epoch_loss / max(num_batches, 1):.4f}",
                 "lr": f"{scheduler.get_last_lr()[0]:.2e}",
                 "gumbel": f"{gumbel_temp:.3f}",
-                "ppl": f"{outputs.codevector_perplexity.item():.1f}",
+                "ppl": f"{codevector_perplexity:.1f}",
             })
 
         avg = epoch_loss / max(num_batches, 1)

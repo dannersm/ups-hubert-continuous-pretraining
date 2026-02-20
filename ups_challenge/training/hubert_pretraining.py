@@ -110,6 +110,7 @@ def train_hubert(
         loss_history = ckpt.get("loss_history", [])
         optimizer.load_state_dict(ckpt["optimizer"])
         scheduler.load_state_dict(ckpt["scheduler"])
+        del ckpt
         print(f"  Resumed at epoch {start_epoch+1}, global_step {global_step}")
     elif projection_warmup_epochs > 0:
         optimizer, scheduler = _setup_projection_phase(lr=projection_lr, model=model)
@@ -166,11 +167,13 @@ def train_hubert(
 
             # Forward
             loss, _ = model(input_values, labels, wav_attention_mask)
+            del input_values, labels, wav_attention_mask, waveforms, inputs
             loss = loss / grad_accum_steps
 
             # Backward (accumulate gradients)
             loss.backward()
             accum_loss += loss.item()
+            del loss
             micro_step += 1
 
             if micro_step % grad_accum_steps != 0:
@@ -182,7 +185,7 @@ def train_hubert(
             # Optimizer step
             optimizer.step()
             scheduler.step()
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
 
             loss_val = accum_loss
             accum_loss = 0.0
